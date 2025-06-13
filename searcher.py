@@ -48,11 +48,14 @@ def search_index(query: str) -> list[str]:
 
 def generate_llm_response(search_response: list[str], user_query: str) -> None:
 
-    endpoint = "https://azopenai1592.openai.azure.com/"
-    model_name = "gpt-4.1-nano"
-    deployment = "gpt-4.1-nano"
+    endpoint = os.getenv(
+        "AZURE_OPENAI_ENDPOINT",
+        "https://azopenai1592.openai.azure.com/openai/deployments/gpt-4.1-nano",
+    )
+    model_name = os.getenv("AZURE_OPENAI_GPT_DEPLOYMENT", "gpt-4.1-nano")
+    deployment = model_name
     subscription_key = AZURE_OPENAI_API_KEY
-    api_version = "2024-12-01-preview"
+    api_version = os.getenv("OPENAI_API_VERSION", "2024-02-01")
     dynamic_search_response = json.dumps(search_response, indent=2)
     SYSTEM_PROMPT = (
         "You are a helpful assistant. Use the following information to answer the user's question. If you don't know the answer, say 'I don't know'.\n\n"
