@@ -7,6 +7,7 @@ from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchItemPaged
 from dotenv import load_dotenv
 import os
+from openai import AzureOpenAI
 
 
 # Load environment variables from .env file
@@ -16,44 +17,87 @@ OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL")
 AZURE_SEARCH_ADMIN_KEY = os.getenv("AZURE_SEARCH_ADMIN_KEY")
 AZURE_SEARCH_SERVICE_ENDPOINT = os.getenv("AZURE_SEARCH_SERVICE_ENDPOINT")
 AZURE_SEARCH_INDEX_NAME = os.getenv("AZURE_SEARCH_INDEX_NAME")
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 credential = AzureKeyCredential(AZURE_SEARCH_ADMIN_KEY)
 
 
-def print_results(results: SearchItemPaged[dict]):
-    semantic_answers = results.get_answers()
-    if semantic_answers:
-        for answer in semantic_answers:
-            if answer.highlights:
-                print(f"Semantic Answer: {answer.highlights}")
-            else:
-                print(f"Semantic Answer: {answer.text}")
-            print(f"Semantic Answer Score: {answer.score}\n")
+def search_index(query: str) -> list[str]:
+    """Searches the Azure Search index using a vector query and returns the top results."""
+    search_client = SearchClient(
+        endpoint=AZURE_SEARCH_SERVICE_ENDPOINT,
+        index_name=AZURE_SEARCH_INDEX_NAME,
+        credential=credential,
+    )
+    vector_query = VectorizableTextQuery(
+        text=query,
+        k_nearest_neighbors=50,
+        fields="textVector,topicVector,descriptionVector",
+    )
 
-    for result in results:
-        print(f"Title: {result['title']}")
-        print(f"Score: {result['@search.score']}")
-        if result.get("@search.reranker_score"):
-            print(f"Reranker Score: {result['@search.reranker_score']}")
-        print(f"Content: {result['content']}")
-        print(f"URL: {result['url']}\n")
+    results = search_client.search(
+        search_text=None,
+        vector_queries=[vector_query],
+        select=["text", "topic", "description"],
+        top=3,
+    )
+
+    search_response = [result["text"] for result in results]
+
+    return search_response
 
 
-search_client = SearchClient(
-    endpoint=AZURE_SEARCH_SERVICE_ENDPOINT,
-    index_name=AZURE_SEARCH_INDEX_NAME,
-    credential=credential,
-)
+def generate_llm_response(search_response: list[str], user_query: str) -> None:
 
-query = "Which enhancements are available"
+    endpoint = "https://azopenai1592.openai.azure.com/"
+    model_name = "gpt-4.1-nano"
+    deployment = "gpt-4.1-nano"
+    subscription_key = AZURE_OPENAI_API_KEY
+    api_version = "2024-12-01-preview"
+    dynamic_search_response = json.dumps(search_response, indent=2)
+    SYSTEM_PROMPT = (
+        "You are a helpful assistant. Use the following information to answer the user's question. If you don't know the answer, say 'I don't know'.\n\n"
+        + dynamic_search_response
+        + "\n\n"
+        "Be precise and concise in your answers. Do not include any additional information that is not relevant to the user's question.\n\n"
+    )
 
-vector_query = VectorizableTextQuery(
-    text=query, k_nearest_neighbors=50, fields="contentVector"
-)
-results = search_client.search(
-    search_text=None,
-    vector_queries=[vector_query],
-    select=["content", "url", "title"],
-    top=3,
-)
+    client = AzureOpenAI(
+        api_version=api_version,
+        azure_endpoint=endpoint,
+        api_key=subscription_key,
+    )
 
-print_results(results)
+    response = client.chat.completions.create(
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": user_query,
+            },
+        ],
+        max_completion_tokens=800,
+        temperature=1.0,
+        top_p=1.0,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        model=deployment,
+    )
+
+    print(
+        "A: " + response.choices[0].message.content
+    )  # Placeholder for LLM response generation logic
+
+
+if __name__ == "__main__":
+
+    query = "What needs to be done under the Data Access tab?"
+    query = input("Q: ")
+    generate_llm_response(search_index(query), query)
+    while query.lower() != "exit":
+        query = input("Q: ")
+        if query.lower() == "exit":
+            break
+        generate_llm_response(search_index(query), query)

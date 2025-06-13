@@ -19,10 +19,18 @@ from azure.search.documents.indexes.models import (
 from azure.search.documents import SearchClient
 import json
 from azure.core.credentials import AzureKeyCredential
-from main import scrape_website, chunk_text, generate_embeddings
+from main import (
+    llm_chunking,
+    scrape_website,
+    chunk_text,
+    generate_embeddings,
+    Chunk,
+    ChunkResponse,
+)
 import random
 from dotenv import load_dotenv
 import os
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -74,10 +82,29 @@ def create_or_update_search_index(
 
     fields = [
         SearchField(name="id", type=SearchFieldDataType.String, key=True),
-        SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
-        SearchField(name="url", type=SearchFieldDataType.String, filterable=True),
+        SearchField(name="text", type=SearchFieldDataType.String, searchable=True),
+        SearchField(name="topic", type=SearchFieldDataType.String, filterable=True),
         SearchField(
-            name="contentVector",
+            name="description", type=SearchFieldDataType.String, filterable=True
+        ),
+        SearchField(
+            name="textVector",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+            vector_search_profile_name="myHnswProfile",
+            vector_search_dimensions=embedding_dimensions,
+            searchable=True,
+            retrievable=True,
+        ),
+        SearchField(
+            name="topicVector",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+            vector_search_profile_name="myHnswProfile",
+            vector_search_dimensions=embedding_dimensions,
+            searchable=True,
+            retrievable=True,
+        ),
+        SearchField(
+            name="descriptionVector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             vector_search_profile_name="myHnswProfile",
             vector_search_dimensions=embedding_dimensions,
@@ -85,10 +112,19 @@ def create_or_update_search_index(
             retrievable=True,
         ),
         # Add other metadata fields if needed, e.g., title, last_modified, etc.
-        SearchField(name="title", type=SearchFieldDataType.String, searchable=True),
+        SearchField(
+            name="keywords",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.String),
+            searchable=True,
+        ),
+        SearchField(
+            name="links",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.String),
+            searchable=True,
+        ),
     ]
 
-    semantic_search = SemanticSearch(
+    """semantic_search = SemanticSearch(
         default_configuration_name="semantic_config",
         configurations=[
             SemanticConfiguration(
@@ -100,13 +136,12 @@ def create_or_update_search_index(
                 ),
             )
         ],
-    )
+    )"""
 
     index = SearchIndex(
         name=index_name,
         fields=fields,
         vector_search=vector_search,
-        semantic_search=semantic_search,
     )
     print(f"Creating or updating index '{index_name}'...")
     index_client.create_or_update_index(index)
@@ -131,6 +166,7 @@ def upload_documents_to_azure_ai_search(index_name, documents):
 
 
 if __name__ == "__main__":
+
     embedding_model_name = (
         "text-embedding-3-large"  # Match this to your deployed embedding model name
     )
@@ -138,39 +174,74 @@ if __name__ == "__main__":
 
     # 2. Example: Scrape, Chunk, Embed, and Prepare Documents for Indexing
     website_urls = [
-        "https://help.csod.com/myguide/Content/MyGuide/SolutionsLibrary.htm",
-        "https://help.csod.com/myguide/Content/MyGuide/Insights/Insights.htm",
-        "https://help.csod.com/myguide/Content/MyGuide/Creator/Creator.htm",
+        "https://help.csod.com/lxp/Content/Analytics/EdData/DataAccess_Export.htm",
         # Add more URLs as needed
     ]
 
     documents_to_upload = []
     doc_id_counter = 0
+    prompt = """You are an expert text analysis and summarization assistant. Your task is to process a given long document and break it down into semantically coherent, concise chunks of max 100 words. For each generated chunk, you must also extract specific metadata.
+
+**Strict Output Format:**
+Output ONLY a JSON array. Do not include any introductory text, concluding remarks, or explanations outside the JSON. The JSON must be valid and directly parsable.
+
+**Chunking Rules:**
+1.  **Semantic Coherence:** Each chunk must represent a single, complete idea, topic, or logical unit. Prioritize semantic completeness over strict length.
+2.  **No Meaningful Overlap:** Chunks should ideally not overlap in content, unless absolutely necessary to keep a complete thought that spans a natural semantic break.
+3.  **Target Length Guideline:** Aim for each chunk's `text` content to be approximately **200 to 500 words (or 800-2000 characters)**. Adjust as needed to maintain semantic coherence. If a natural semantic unit is slightly larger or smaller, keep it together.
+4.  **No Broken Sentences:** Do not split a sentence across chunks.
+5.  **Conciseness:** Ensure each chunk is as concise as possible while retaining its full meaning.
+
+**Metadata to Extract for Each Chunk:**
+For each chunk you create, provide the following fields:
+
+* `text` (string): The full, raw text content of the semantically coherent chunk.
+* `topic` (string): The overarching main subject or theme of *this specific chunk*, articulated in 3-7 words. Example: "Latest advancements in AI research".
+* `description` (string): A single, concise sentence (max 25 words) that summarizes the core content of this chunk.
+* `keywords` (array of strings): A list of 3 to 7 highly relevant key terms or phrases extracted directly from this chunk's content. Do not include generic stop words. Example: `["semantic chunking", "LLM applications", "RAG systems"]`.
+* `links` (array of strings): A list of any full URLs (e.g., starting with "http://" or "https://", "www.") that are explicitly mentioned and fully visible *within the text content of this specific chunk*. Do not infer links. If no links are found, provide an empty array `[]`.
+
+**Output JSON Schema:**
+```json
+[
+  {
+    "text": "The full text content of the first chunk.",
+    "topic": "Concise topic of chunk 1",
+    "description": "A single sentence describing the content of chunk 1.",
+    "keywords": ["keyword1", "keyword2", "keyword3"],
+    "links": ["http://example.com/link1", "https://another.link/"]
+  },
+  {
+    "text": "The full text content of the second chunk.",
+    "topic": "Concise topic of chunk 2",
+    "description": "A single sentence describing the content of chunk 2.",
+    "keywords": ["keywordA", "keywordB"],
+    "links": []
+  }
+]"""
 
     for url in website_urls:
         print(f"\nProcessing URL: {url}")
         scraped_content = scrape_website(url)
         if scraped_content:
-            text_chunks = chunk_text(scraped_content)
-            print(text_chunks)
-            embeddings = generate_embeddings(text_chunks, use_azure_openai=True)
-            print(f"***************{len(embeddings)}")
-            for i, chunk in enumerate(text_chunks):
+            resp: ChunkResponse = llm_chunking(scraped_content, prompt=prompt)
 
-                if i < len(embeddings):
-                    document_id = f"{random.randint(1000, 9999)}"
-                    documents_to_upload.append(
-                        {
-                            "id": document_id,
-                            "content": chunk,
-                            "url": url,
-                            "contentVector": embeddings[i],
-                            "title": f"Content from {url} - Part {i+1}",  # Example title
-                        }
-                    )
+            for i, part in enumerate(resp.chunks):
+                document_id = f"{random.randint(1000, 9999)}"
+                documents_to_upload.append(
+                    {
+                        "id": document_id,
+                        "text": part.text,
+                        "topic": part.topic,
+                        "description": part.description,
+                        "keywords": part.keywords,
+                        "links": part.links,
+                        "textVector": generate_embeddings(part.text),
+                        "topicVector": generate_embeddings(part.topic),
+                        "descriptionVector": generate_embeddings(part.description),
+                    }
+                )
 
-                else:
-                    print(f"Warning: No embedding for chunk {i} of {url}. Skipping.")
         else:
             print(f"No content scraped from {url}")
 

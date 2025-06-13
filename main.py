@@ -1,13 +1,31 @@
+import json
+from typing import List
 import requests
 from bs4 import BeautifulSoup
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
 from openai import AzureOpenAI
+from azure.ai.inference import ChatCompletionsClient
+from azure.core.credentials import AzureKeyCredential
 from dotenv import load_dotenv
+from pydantic import BaseModel
+from azure.ai.inference.models import SystemMessage, UserMessage
 import os
 
 # This script scrapes a webpage and prints the text content.
 # It uses the requests library to fetch the page and BeautifulSoup to parse the HTML.
+
+
+class Chunk(BaseModel):
+    text: str
+    topic: str
+    description: str
+    keywords: list[str]
+    links: list[str]
+
+
+class ChunkResponse(BaseModel):
+    chunks: list[Chunk]
 
 
 def scrape_website(url):
@@ -66,27 +84,54 @@ AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME = os.getenv(
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
 
 
-def generate_embeddings(text_chunks, use_azure_openai=False):
+def generate_embeddings(text: str) -> str:
     embeddings_list = []
-    if use_azure_openai:
-        client = AzureOpenAI(
-            api_key=AZURE_OPENAI_API_KEY,
-            azure_endpoint=AZURE_OPENAI_ENDPOINT,
-            api_version="2024-02-01",  # Or your specific API version
-        )
-        for chunk in text_chunks:
-            response = client.embeddings.create(
-                input=[chunk], model=AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME
-            )
-            embeddings_list.append(response.data[0].embedding)
-    else:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        for chunk in text_chunks:
-            response = client.embeddings.create(
-                input=[chunk], model=OPENAI_EMBEDDING_MODEL
-            )
-            embeddings_list.append(response.data[0].embedding)
-    return embeddings_list
+
+    client = AzureOpenAI(
+        api_key=AZURE_OPENAI_API_KEY,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_version="2024-02-01",  # Or your specific API version
+    )
+
+    response = client.embeddings.create(
+        input=[text], model=AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME
+    )
+
+    return response.data[0].embedding
+
+
+endpoint = os.getenv(
+    "AZURE_OPENAINANO_ENDPOINT",
+    "https://azopenai1592.openai.azure.com/openai/deployments/gpt-4.1-nano",
+)
+model_name = os.getenv("AZURE_OPENAI_GPT_MODEL", "gpt-4.1-nano")
+
+
+def llm_chunking(text: str, prompt: str) -> ChunkResponse:
+    """Generates text chunks using a language model."""
+
+    client = ChatCompletionsClient(
+        endpoint=endpoint,
+        credential=AzureKeyCredential(
+            os.getenv("AZURE_OPENAI_API_KEY", "random-key-1234567890")
+        ),
+        api_version="2024-05-01-preview",
+    )
+
+    response = client.complete(
+        messages=[
+            SystemMessage(content=prompt),
+            UserMessage(content="Please chunk the following text: " + text),
+        ],
+        max_tokens=2048,
+        model=model_name,
+    )
+    json_str = response.choices[0].message.content
+    print(f"JSON response from LLM: {json_str}")
+    chunks_data: List[Chunk] = [Chunk(**item) for item in json.loads(json_str)]
+    chunks = ChunkResponse(chunks=chunks_data)
+
+    return chunks
 
 
 if __name__ == "__main__":
