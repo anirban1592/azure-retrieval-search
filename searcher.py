@@ -93,7 +93,6 @@ def generate_llm_response(search_response: list[str], user_query: str) -> None:
 
 if __name__ == "__main__":
 
-    query = "What needs to be done under the Data Access tab?"
     query = input("Q: ")
     generate_llm_response(search_index(query), query)
     while query.lower() != "exit":
